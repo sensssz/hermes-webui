@@ -1448,6 +1448,33 @@ _updates._windows_restart_spawn = _pytest_session_safe_windows_restart_spawn
 _updates._windows_restart_exit = _pytest_session_safe_windows_restart_exit
 
 
+def _reapply_windows_restart_guard():
+    """Re-attach the restart no-ops to whichever api.updates is live.
+
+    tests/test_issue1579_whats_new_link_404.py does ``del sys.modules['api.updates']``
+    and re-imports, which hands back a module carrying the REAL restart seams:
+    the assignment above only covers the module object that existed when this
+    conftest was imported. With real seams back in place, a ``_schedule_restart()``
+    daemon thread that outlives the test that started it (the family documented in
+    the os.execv guard above) reaches ``_windows_restart_exit`` -> ``os._exit(0)``
+    and kills the whole session mid-run -- exit code 0, no terminal summary,
+    output cut mid-line. Observed at ~94% of a full-suite run on Windows.
+    """
+    mod = sys.modules.get("api.updates")
+    if mod is None or mod is _updates:
+        return
+    for name, guard in (
+        ("_windows_restart_spawn", _pytest_session_safe_windows_restart_spawn),
+        ("_windows_restart_exit", _pytest_session_safe_windows_restart_exit),
+    ):
+        if getattr(mod, name, None) is not guard:
+            setattr(mod, name, guard)
+
+
+def pytest_runtest_setup(item):
+    _reapply_windows_restart_guard()
+
+
 def _hermes_cli_is_healthy() -> bool:
     mod = sys.modules.get("hermes_cli")
     if mod is None or mod is not _REAL_HERMES_CLI:

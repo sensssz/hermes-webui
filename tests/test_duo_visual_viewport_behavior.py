@@ -32,6 +32,14 @@ def _run(body):
     # execute its original consumer unchanged for the failing-before proof.
     helper = (_function(boot, "_plausibleVisualViewport")
               if "function _plausibleVisualViewport(" in boot else "")
+    # The merged inset sync consults these; supply the real definitions when the
+    # source revision contains them, the way the plausibility helper is supplied.
+    extras = ""
+    if "function _hasFocusedEditableElement(" in boot:
+        extras += "\n" + _function(boot, "_hasFocusedEditableElement")
+    if "const KEYBOARD_MIN_HEIGHT_PX=" in boot:
+        tail = boot.split("const KEYBOARD_MIN_HEIGHT_PX=")[1]
+        extras += "\nconst KEYBOARD_MIN_HEIGHT_PX=" + tail.split(";")[0] + ";"
     source = r"""
 const window = {innerHeight: 678, innerWidth: 390};
 const properties = new Map([['--keyboard-bottom-inset', '328px']]);
@@ -39,6 +47,13 @@ const document = {documentElement: {style: {
   setProperty: (key, value) => properties.set(key, value),
   removeProperty: key => properties.delete(key),
 }}};
+// The merged inset sync asks whether an editor has focus; the harness answers
+// it the way _hasFocusedEditableElement would when a real editor is focused.
+class HTMLElement {}
+globalThis.document = document;
+document.activeElement = new HTMLElement();
+document.activeElement.tagName = 'INPUT';
+document.activeElement.isContentEditable = true;
 const matchMedia = () => ({matches: true});
 const _hasFinePointerCoexisting = () => false;
 function sample(geometry) {
@@ -49,6 +64,7 @@ function sample(geometry) {
 }
 """ + "\n".join([
         helper,
+        extras,
         _function(boot, "_isTouchKeyboardViewport"),
         _function(boot, "_syncKeyboardBottomInset"),
         _function(sessions, "_projectPickerVisibleBounds"),

@@ -31,10 +31,11 @@ def test_thinking_card_toggle_and_body_use_animation_friendly_state():
     assert ".thinking-card-toggle{font-size:10px;display:inline-flex;" in COMPACT_CSS
     assert ".thinking-card-header{display:flex;align-items:center;gap:8px;" in COMPACT_CSS
     # Body uses div default (display:block); canonical rule lives in the
-    # consolidated block. Open state caps at 260px (intentional "quieter" sizing).
+    # consolidated block. Open state caps at 470px (local sizing: raised from
+    # 260px to 520px, then trimmed 50px to 470px on 2026-10-17).
     assert ".thinking-card-body{max-height:0;opacity:0;overflow:hidden;" in COMPACT_CSS
     assert re.search(
-        r"\.thinking-card\.open\s+\.thinking-card-body\s*\{[^}]*max-height:\s*260px;[^}]*opacity:\s*1;",
+        r"\.thinking-card\.open\s+\.thinking-card-body\s*\{[^}]*max-height:\s*470px;[^}]*opacity:\s*1;",
         STYLE_CSS,
     )
 

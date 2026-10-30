@@ -238,10 +238,24 @@ function _plausibleVisualViewport(){
   };
 }
 
+// Only a focused editor can raise the on-screen keyboard, so a viewport shrink
+// measured while nothing editable has focus is a scrolled page, not an open
+// keyboard.
+function _hasFocusedEditableElement(){
+  const active=document.activeElement;
+  if(!(active instanceof HTMLElement)) return false;
+  return active.isContentEditable||active.tagName==='INPUT'||active.tagName==='SELECT'||active.tagName==='TEXTAREA';
+}
+
+// Smallest visual-viewport shrink that can only come from the on-screen
+// keyboard. Safari toolbars and safe-area insets stay well below this, so a
+// chrome change never publishes a jittering few-pixel inset.
+const KEYBOARD_MIN_HEIGHT_PX=60;
+
 function _syncKeyboardBottomInset(){
   const root=document.documentElement;
   if(!root) return;
-  if(!window.visualViewport||!_isTouchKeyboardViewport()){
+  if(!window.visualViewport||!_isTouchKeyboardViewport()||!_hasFocusedEditableElement()){
     root.style.removeProperty('--keyboard-bottom-inset');
     return;
   }
@@ -264,7 +278,7 @@ function _syncKeyboardBottomInset(){
     return;
   }
   const inset=Math.max(0,Math.ceil(window.innerHeight-(vvOk.height+vvOk.offsetTop)));
-  if(inset>0){
+  if(inset>=KEYBOARD_MIN_HEIGHT_PX){
     root.style.setProperty('--keyboard-bottom-inset',`${inset}px`);
   }else{
     root.style.removeProperty('--keyboard-bottom-inset');
@@ -289,6 +303,35 @@ function _forceMobileViewportReflow(){
     try{ syncWorkspacePanelState(); }catch(_){ }
     try{ if(typeof _syncSidebarAria==='function') _syncSidebarAria(); }catch(_){ }
   });
+}
+
+// WebKit settles the shrunken visual viewport only after the keyboard
+// animation finishes, often without dispatching another resize event
+// (bugs.webkit.org 265578), and an IME candidate bar resizes the keyboard with
+// no viewport event at all. Re-read the geometry for a short while after every
+// trigger so the inset lands on the value WebKit settles on instead of a
+// mid-animation one. One chain at a time: a keystroke arriving mid-chain must
+// not restart it, or continuous typing would keep pushing the last re-read
+// into the future.
+const KEYBOARD_INSET_SETTLE_DELAYS_MS=[48,120,240,420,720];
+let _keyboardInsetSettleRunning=false;
+
+function _scheduleKeyboardInsetSettle(){
+  if(_keyboardInsetSettleRunning) return;
+  _keyboardInsetSettleRunning=true;
+  const step=(index)=>{
+    if(index>=KEYBOARD_INSET_SETTLE_DELAYS_MS.length){
+      _keyboardInsetSettleRunning=false;
+      return;
+    }
+    setTimeout(()=>{
+      // _forceMobileViewportReflow() resyncs the inset first, then bails out of
+      // the repaint below phone width, so one call covers both jobs.
+      _forceMobileViewportReflow();
+      step(index+1);
+    },KEYBOARD_INSET_SETTLE_DELAYS_MS[index]);
+  };
+  step(0);
 }
 
 function _syncWorkspacePanelInlineWidth(){
@@ -3364,6 +3407,19 @@ if(window.visualViewport){
   };
   window.visualViewport.addEventListener('resize', _scheduleMobileViewportReflow);
   window.visualViewport.addEventListener('scroll', _scheduleMobileViewportReflow);
+  // The listeners above only fire when the browser dispatches a viewport event,
+  // which WebKit does not guarantee once the keyboard animation settles, and an
+  // IME candidate bar (pinyin/Chinese input) never fires one at all. Re-read on
+  // keystrokes against the focused composer as well.
+  window.visualViewport.addEventListener('resize', _scheduleKeyboardInsetSettle);
+  window.visualViewport.addEventListener('scroll', _scheduleKeyboardInsetSettle);
+  const _onEditableActivity=()=>{
+    if(!_hasFocusedEditableElement()) return;
+    _scheduleKeyboardInsetSettle();
+  };
+  for(const _keyboardActivityEvent of ['compositionstart','compositionupdate','compositionend','input','keyup']){
+    document.addEventListener(_keyboardActivityEvent,_onEditableActivity);
+  }
 }
 
 // Boot: restore last session or start fresh

@@ -287,6 +287,17 @@ const uiSrc = fs.readFileSync(process.env.ISSUE5720_UI_JS, 'utf8');
 const messagesSrc = fs.readFileSync(process.env.ISSUE5720_MESSAGES_JS, 'utf8');
 const anchorsSrc = fs.readFileSync(process.env.ISSUE5720_ANCHORS_JS, 'utf8');
 
+// Helpers the scene renderer grew after this harness was written; the fallback
+// in extractFunc below answers them with a no-op when an older ui.js has no
+// definition. Listed here are the worklog reuse helpers added alongside the
+// worklog builder — the harness evals by name, so a new dependency must appear
+// in the extract list too.
+const optionalSceneHelpers = new Set([
+  '_anchorSceneCanRefreshInPlace','_anchorSceneThinkingText',
+  '_anchorSceneRowContentSignature','_anchorSceneRowRenderSignature',
+  '_rowTextSample','_anchorSceneCarryDisclosureState',
+]);
+
 function extractFunc(src, name){
   const start = src.indexOf('function ' + name);
   if(start < 0){
@@ -294,6 +305,12 @@ function extractFunc(src, name){
       return `function ${name}(){ return false; }`;
     }
     if(name==='_anchorSceneRowTimestampSeconds'){
+      return `function ${name}(){ return null; }`;
+    }
+    // Per-frame helpers the renderer only grew recently. Older ui.js has no
+    // definition and never calls them, so a no-op keeps this harness running
+    // against both revisions instead of pinning it to one.
+    if(optionalSceneHelpers.has(name)){
       return `function ${name}(){ return null; }`;
     }
     throw new Error(name + ' not found');
@@ -577,6 +594,11 @@ for(const name of [
   '_resetMismatchedLiveAssistantTurnForSession',
   '_liveAnchorReasoningRowForFallback','_updateLiveAnchorReasoningRowForFallback',
   '_anchorSceneNodeForRow','_anchorSceneWorklogGroup','_renderAnchorSceneRowsIntoWorklog',
+  // Worklog reuse helpers the builder calls on every frame; this harness evals
+  // functions by name, so a new dependency must be listed here too.
+  '_anchorSceneCanRefreshInPlace','_anchorSceneThinkingText',
+  '_anchorSceneRowContentSignature','_anchorSceneRowRenderSignature',
+  '_rowTextSample','_anchorSceneCarryDisclosureState',
   'isLiveAnchorActivitySceneOwner','_projectLiveAnchorActivitySceneForStream',
   '_restoreLiveAnchorScrollSnapshotAfterRebuild',
   '_renderLiveAnchorActivitySceneTransparent','renderLiveAnchorActivityScene',

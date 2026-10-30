@@ -17705,7 +17705,7 @@ function _anchorSceneWorklogGroup(blocks, opts){
   if(opts&&opts.turnStartedAt!==undefined&&opts.turnStartedAt!==null) group.setAttribute('data-turn-started-at',String(opts.turnStartedAt));
   return group;
 }
-// Tool DOM is expensive and usually immutable while prose streams. Keep the
+// Streaming worklog rows reconcile in place: identity is enough to rebuild a
 // signature on the node, not in a global cache: removing a turn drops its cache,
 // and HTML-restored nodes take the normal build/rehydration path once. Include
 // the full row so in-place result/argument corrections cannot reuse stale HTML.
@@ -17729,9 +17729,93 @@ function _anchorScenePlaceChildren(parent, nodes){
   const keep=new Set(nodes);
   Array.from(parent.children).forEach(node=>{if(!keep.has(node)) node.remove();});
 }
+// What a row may be refreshed in place for: a thinking row whose card already
+// exists. Prose is not refreshed here — its builder runs the markdown/mime path
+// and upstream semantics are to rebuild prose rows; refreshing a prose node with
+// thinking text would clobber the rendered markdown.
+function _anchorSceneCanRefreshInPlace(row, node){
+  if(!row||row.role!=='thinking'||!node||!node.querySelector) return false;
+  return !!node.querySelector('.thinking-card');
+}
+function _anchorSceneThinkingText(row){
+  if(!row) return '';
+  const nested=row.thinking&&typeof row.thinking==='object'?row.thinking:null;
+  const candidates=[row.text,nested&&nested.text,row.content,row.message,row.reasoning,row.reasoning_content];
+  for(const candidate of candidates){ if(typeof candidate==='string'&&candidate.trim()) return candidate; }
+  return '';
+}
+function _anchorSceneRowContentSignature(row, opts){
+  if(!row) return '';
+  const role=String(row.role||'');
+  const pieces=[role,String(row.kind||''),String(row.source_event_type||''),String(row.name||''),
+    String(row.status||''),String(row.index===undefined||row.index===null?'':row.index),
+    _rowTextSample(row.text),_rowTextSample(row.text_preview)];
+  if(role==='tool'){
+    let call=null;
+    try{ call=typeof _anchorSceneToolCallFromRow==='function'?_anchorSceneToolCallFromRow(row,opts):null; }catch(_){ call=null; }
+    if(call){
+      let args='';
+      try{ args=JSON.stringify(call.args||''); }catch(_){ args=String(call.args||''); }
+      pieces.push('tool',_rowTextSample(call.name),_rowTextSample(call.command),
+        _rowTextSample(call.preview),_rowTextSample(call.snippet),String(call.done),
+        String(call.is_error),String(call.is_diff),
+        String(call.duration===undefined||call.duration===null?'':call.duration),_rowTextSample(args));
+    }
+  }
+  return pieces.join(String.fromCharCode(1));
+}
+// Cheap sample of a piece of text: growth (appends, the streaming case) changes
+// the length, a rewrite in the tail changes the tail.
+function _rowTextSample(value){
+  const text=typeof value==='string'?value:(value===undefined||value===null?'':String(value));
+  return text.length+'|'+text.slice(-160);
+}
+// Carries an open disclosure card onto the node that replaces it. The worklog's
+// own capture/restore machinery binds the behaviours and re-pins tail readers —
+// this covers only a row that was rebuilt mid-stream.
+function _anchorSceneCarryDisclosureState(fromEl,toEl){
+  if(!fromEl||!toEl||!fromEl.querySelectorAll||!toEl.querySelectorAll) return;
+  const selector='.thinking-card,.tool-card,.tool-worklog-tool-group,.tool-group';
+  const fromNodes=Array.from(fromEl.matches&&fromEl.matches(selector)?[fromEl]:fromEl.querySelectorAll(selector));
+  const toNodes=Array.from(toEl.matches&&toEl.matches(selector)?[toEl]:toEl.querySelectorAll(selector));
+  for(let i=0;i<fromNodes.length&&i<toNodes.length;i++){
+    const from=fromNodes[i];
+    const to=toNodes[i];
+    if(!from.classList||!to.classList||!from.classList.contains('open')) continue;
+    to.classList.add('open');
+    to.classList.remove('tool-worklog-tool-group-collapsed');
+    const head=from.querySelector?from.querySelector('.tool-group-head,.tool-worklog-tool-group-head,.thinking-card-header,.tool-card-header,.tool-worklog-summary'):null;
+    const toHead=to.querySelector?to.querySelector('.tool-group-head,.tool-worklog-tool-group-head,.thinking-card-header,.tool-card-header,.tool-worklog-summary'):null;
+    const expanded=head&&head.getAttribute?head.getAttribute('aria-expanded'):null;
+    if(expanded&&toHead&&toHead.setAttribute) toHead.setAttribute('aria-expanded',expanded);
+  }
+}
+// A render signature for every worklog row kind, not just tools. A tool payload
+// serializes whole — the row, its render options, the page language and the tool
+// calling mode — so a tool result or a streamed argument rewrite rebuilds the row
+// instead of reusing stale HTML.
+function _anchorSceneRowRenderSignature(row, opts){
+  if(!row) return '';
+  if(row.role!=='tool') return _anchorSceneRowContentSignature(row,opts);
+  let payload='';
+  try{ payload=JSON.stringify([row,opts||{},document.documentElement.lang,
+    typeof isSimplifiedToolCalling==='function'&&isSimplifiedToolCalling()]); }catch(_){ payload=''; }
+  return payload||_anchorSceneRowContentSignature(row,opts);
+}
+
+// The row key must stay separate from the identity used by the in-place
+// reconciliation — a tool payload rebuilds, prose rows cannot; sharing one
+// string would let a tool result reuse prose HTML.
 function _renderAnchorSceneRowsIntoWorklog(group, rows, opts){
   const list=_toolWorklogListEl(group);
   if(!group||!list) return false;
+  // A live scene reconciles rows in place: every row keeps its DOM element
+  // while its content grows, so a disclosure bar keeps its identity (and its
+  // open state) across frames instead of being re-created ~1/s. Tool rows keep
+  // upstream's stamping model (identity + tool payload signature compared on
+  // the node); prose and thinking rows reuse by content signature and refresh
+  // their text into the same node, and a row that has to be replaced carries
+  // its disclosure state forward.
   const existing=new Map();
   list.querySelectorAll('[data-anchor-scene-row="1"]').forEach(node=>{
     const key=_transparentLiveRowKey(node,'');
@@ -17740,24 +17824,63 @@ function _renderAnchorSceneRowsIntoWorklog(group, rows, opts){
   const children=[];
   let currentTools=null;
   let toolNodes=[];
+  let toolsStable=true;
   const flushTools=()=>{
-    if(currentTools){
-      const mounted=Array.from(currentTools.querySelectorAll('[data-anchor-row-role="tool"]'));
-      const unchanged=mounted.length===toolNodes.length&&mounted.every((node,i)=>node===toolNodes[i]);
-      if(!unchanged) _anchorScenePlaceChildren(currentTools,toolNodes);
-      currentTools._anchorSceneToolsStable=unchanged;
-    }
+    if(!currentTools) return;
+    const mounted=Array.from(currentTools.querySelectorAll('[data-anchor-row-role="tool"]'));
+    const unchanged=mounted.length===toolNodes.length&&mounted.every((node,i)=>node===toolNodes[i]);
+    if(!unchanged) _anchorScenePlaceChildren(currentTools,toolNodes);
+    currentTools._anchorSceneToolsStable=unchanged;
+    if(!unchanged) toolsStable=false;
     currentTools=null;
     toolNodes=[];
   };
+  let onlyTextWritten=!!(opts&&opts.live)&&!(opts&&opts.settled);
   for(const row of rows){
     const key=_anchorSceneDataRowKey(row,'');
     const previous=key?existing.get(key):null;
-    const signature=_anchorSceneToolRenderSignature(row,opts);
-    const node=signature&&previous&&previous._anchorToolRenderSignature===signature
-      ? previous : _anchorSceneNodeForRow(row,opts);
-    if(!node) continue;
-    if(signature) node._anchorToolRenderSignature=signature;
+    const signature=_anchorSceneRowRenderSignature(row,opts);
+    const kept=signature&&previous&&previous.getAttribute&&previous.getAttribute('data-anchor-scene-row-sig')===signature
+      ? previous : null;
+    // A row whose body is the rendered answer cannot be refreshed — its rebuilt
+    // rendered markdown itself — so it is rebuilt here, before the tool check,
+    // and the fresh node carries any open disclosure card over (#5720).
+    if(!kept&&signature&&row.role!=='tool'&&!(previous&&_anchorSceneCanRefreshInPlace(row,previous))){
+      const fresh=_anchorSceneNodeForRow(row,opts);
+      if(!fresh) continue;
+      if(previous){
+        _anchorSceneCarryDisclosureState(previous,fresh);
+        if(previous.replaceWith) previous.replaceWith(fresh);
+        else if(previous.parentElement) previous.parentElement.removeChild(previous);
+      }
+      if(fresh.setAttribute) fresh.setAttribute('data-anchor-scene-row-sig',signature);
+      flushTools();
+      children.push(fresh);
+      onlyTextWritten=false;
+      continue;
+    }
+    let node=kept;
+    if(!node){
+      // The row grew in text: refresh the body in place so the card and its bar
+      // keep their DOM identity instead of restarting on every delta. A row
+      // whose body is the rendered answer cannot be refreshed — prose is the
+      // rebuild path above; a thinking row is refreshed and keeps its card.
+      if(previous&&signature&&_anchorSceneCanRefreshInPlace(row,previous)&&typeof _renderThinkingInto==='function'){
+        _renderThinkingInto(previous,_anchorSceneThinkingText(row));
+        if(row.role==='tool') toolNodes.push(previous);
+        else{ flushTools(); children.push(previous); }
+        continue;
+      }
+      node=_anchorSceneNodeForRow(row,opts);
+      if(!node) continue;
+      if(previous){
+        _anchorSceneCarryDisclosureState(previous, node);
+        if(previous.replaceWith) previous.replaceWith(node);
+        else if(previous.parentElement) previous.parentElement.removeChild(previous);
+      }
+      onlyTextWritten=false;
+      if(node.setAttribute) node.setAttribute('data-anchor-scene-row-sig',signature);
+    }
     if(row.role==='tool'){
       if(!currentTools){
         const parent=previous&&previous.closest('.wl-step-tools[data-worklog-tools="1"]');
@@ -17775,8 +17898,15 @@ function _renderAnchorSceneRowsIntoWorklog(group, rows, opts){
   }
   flushTools();
   _anchorScenePlaceChildren(list,children);
-  if(children.length) _syncToolCallGroupSummary(group);
-  return !!children.length;
+  // Two facts travel separately on purpose. The return value keeps upstream's
+  // meaning — "this call produced rows", which gates the caller's empty-list
+  // wipe. The all-kept flag feeds the reuse-frame skip: when nothing was
+  // rebuilt the capture/restore pair and the scroll replay are skipped, so a
+  // reader's own wheel events inside an open card are not stolen by a replayed
+  // scrollTop, and an identical disclosure write is not repeated.
+  const allRowsKept=onlyTextWritten&&toolsStable&&children.length>0;
+  group.__anchorSceneRowsAllKept=allRowsKept;
+  return children.length>0;
 }
 function _liveProcessedWorklogAnchorScore(group, index){
   if(!group) return -1;
@@ -18044,18 +18174,40 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
     streamId:streamId||S.activeStreamId||'',
     turnStartedAt:S.session&&S.session.pending_started_at,
   });
+  blocks.querySelectorAll('[data-live-assistant="1"]').forEach(el=>{
+    el.classList.add('assistant-segment-worklog-source');
+    el.setAttribute('aria-hidden','true');
+    el.hidden=true;
+  });
   const ok=_renderAnchorSceneRowsIntoWorklog(group,rows,{live:true,settled:false});
   if(!ok){
+    // No rows reached the list: keep upstream's wipe of a stale render and its
+    // summary refresh.
     const list=_toolWorklogListEl(group);
     if(list) list.innerHTML='';
     _syncToolCallGroupSummary(group);
   }
-  if(typeof _restoreWorklogDetailDisclosureState==='function') _restoreWorklogDetailDisclosureState(blocks, liveDisclosureState);
+  // Reusing rows in place keeps every disclosure bar's DOM identity, so the
+  // capture/restore pair and the scroll replay are only needed when a row was
+  // actually rebuilt. Skipping them on a text-only growth frame stops the replay
+  // from stealing the reader's own wheel events (an inner card scroll must not be
+  // overridden by a replayed scrollTop) and stops identical disclosure attributes
+  // being written onto the same nodes. A reuse frame must still release the
+  // height guard the rebuild path released, so a collapsed mid-stream tail
+  // ("turn ended") gets its re-measure instead of an unpin flicker.
+  const rowsAllKept=!!(group&&group.__anchorSceneRowsAllKept);
+  if(!rowsAllKept&&typeof _restoreWorklogDetailDisclosureState==='function') _restoreWorklogDetailDisclosureState(blocks, liveDisclosureState);
   if(typeof _startActivityElapsedTimer==='function') _startActivityElapsedTimer(group);
   _dedupeLiveProcessedWorklogAnchors(turn);
   if(typeof _moveLiveRunStatusToTurnEnd==='function') _moveLiveRunStatusToTurnEnd();
-  _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
-  _restoreLiveAnchorScrollSnapshotAfterRebuild(scrollSnapshot,scrollRebuildGuard);
+  if(!rowsAllKept){
+    _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
+    _restoreLiveAnchorScrollSnapshotAfterRebuild(scrollSnapshot,scrollRebuildGuard);
+  } else if(scrollRebuildGuard&&scrollRebuildGuard.release){
+    // Nothing was rebuilt: release the height guard the rebuild path would have
+    // released, without replaying the scroll position captured before this frame.
+    scrollRebuildGuard.release();
+  }
   if(!scrollRebuildGuard.readerAwayFromBottom&&typeof scrollIfPinned==='function') scrollIfPinned();
   return true;
 }

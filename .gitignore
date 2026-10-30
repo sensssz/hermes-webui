@@ -84,3 +84,7 @@ docs/ui-ux/review-shots/
 # Local WebUI runtime data and credentials
 .webui_password
 attachments/
+
+# NSSM service logs
+logs/
+webui-launch.log

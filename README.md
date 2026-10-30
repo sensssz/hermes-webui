@@ -394,6 +394,9 @@ before the session's named-profile Gateway ownership is known.
 - Files slide-over panel from right edge
 - Touch targets minimum 44px on all interactive elements
 - Full-height chat/composer on phones without bottom-nav spacing
+- Keyboard-aware composer padding on phones -- the on-screen keyboard's height is
+  measured from the visual viewport, floored so toolbars and safe-area insets
+  never fake a keyboard, and re-read as it animates
 - Desktop layout completely unchanged
 
 ---

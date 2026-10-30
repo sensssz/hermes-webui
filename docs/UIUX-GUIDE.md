@@ -200,7 +200,14 @@ dimension from `static/style.css`, and
 
 Mobile is not an afterthought. The repository documents a responsive layout with
 a hamburger sidebar, mobile-accessible top tabs, a right-edge file slide-over,
-full-height chat/composer behavior on phones, and touch-friendly controls.
+full-height chat/composer behavior on phones, and touch-friendly controls. The
+composer also reserves the on-screen keyboard's height: the viewport shrink is
+measured from the visual viewport, suppressed outright while the page is pinched
+(`scale != 1` reads zoom, never a keyboard), floored so a toolbar or safe-area
+inset never fakes a keyboard, gated on a focused editable element, and re-read
+on a settle ladder because WebKit settles the shrunken viewport only after the
+keyboard animation, often without dispatching another resize event, and an IME
+candidate bar dispatches none at all.
 
 For UI changes, verify the relevant states:
 
