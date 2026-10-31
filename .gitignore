@@ -88,3 +88,7 @@ attachments/
 # NSSM service logs
 logs/
 webui-launch.log
+
+# Windows-only NSSM service wrapper (run-service.cmd is this box's service entry
+# point; nothing else in the repo references it, so it stays local).
+run-service.cmd
